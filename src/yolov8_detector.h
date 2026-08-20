@@ -17,7 +17,7 @@ struct Detection {
 
 // YOLOv8 detector for the Ultralytics nms=False ONNX output.
 // The expected output is [1, 4 + num_classes, num_predictions] (for this
-// model [1,24,8400]); the decoder restores boxes to the camera image and runs
+// model [1,10,8400]); the decoder restores boxes to the camera image and runs
 // class-aware NMS outside the ONNX graph.
 class Yolov8Detector {
 public:

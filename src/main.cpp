@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <csignal>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -59,11 +60,18 @@ public:
                    bool prebuffer = false, size_t prebuffer_count = 1) {
         std::unique_lock<std::mutex> lock(mutex_);
         auto ready = [&] {
-            return closed_ || abort.load() ||
+            return closed_ || abort.load() || g_signal_stop != 0 ||
                    (!queue_.empty() && (!prebuffer || queue_.size() >= prebuffer_count));
         };
-        cv_.wait(lock, ready);
-        if (abort.load() && queue_.empty()) return false;
+        // A signal handler cannot safely notify this condition variable. Poll
+        // so Ctrl-C is observed even when no frame is available, but keep
+        // waiting after a timeout instead of treating it as end-of-stream.
+        while (!ready()) {
+            cv_.wait_for(lock, std::chrono::milliseconds(100));
+        }
+        // Drain an already queued newest item before stopping. Once abort is
+        // requested and the queue is empty, let the consumer exit.
+        if ((abort.load() || g_signal_stop != 0) && queue_.empty()) return false;
         if (queue_.empty()) return false;
         value = std::move(queue_.back());
         if (queue_.size() > 1) dropped_pending_ += queue_.size() - 1;
@@ -164,7 +172,7 @@ static void usage(const char* exe) {
               << "  --no-display       run pipeline without window\n"
               << "  --max-frames N     stop after N frames enter preprocess (0=unlimited)\n"
               << "  --dump-input PATH  dump first preprocessed tensor as float32\n"
-              << "  --self-test        initialize OpenCV RVV and model, run one inference\n";
+              << "  --self-test        run NV12->OpenCV RVV preprocessing and one inference\n";
 }
 
 static bool parse(int argc, char** argv, Args& a) {
@@ -257,13 +265,31 @@ int main(int argc, char** argv) {
     Yolov8Detector detector;
     if (!detector.init(a.model, a.intra_threads)) return 5;
     if (a.self_test) {
-        std::vector<float> zeros(3 * 640 * 640, 0.0f);
         try {
-            const auto ds = detector.infer(zeros.data(), zeros.size(), a.conf, 1.0f, 0, 0, 640, 640);
-            std::cout << "Self-test passed: " << ds.size() << " detections.\n";
+            // Exercise the same NV12 -> letterbox -> RGB -> CHW path used by
+            // camera frames. A model-only zero tensor test would not catch
+            // OpenCV NV12 plane/resize/conversion regressions.
+            constexpr int synthetic_width = 1280;
+            constexpr int synthetic_height = 720;
+            cv::Mat synthetic_nv12(synthetic_height * 3 / 2, synthetic_width,
+                                   CV_8UC1, cv::Scalar(128));
+            const auto prep_result = pre.preprocess(synthetic_nv12);
+            if (!prep_result.data || prep_result.data->size() != 3 * 640 * 640) {
+                throw std::runtime_error("OpenCV RVV self-test returned an invalid tensor");
+            }
+            for (float value : *prep_result.data) {
+                if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+                    throw std::runtime_error("OpenCV RVV self-test returned invalid tensor values");
+                }
+            }
+            const auto ds = detector.infer(prep_result.data->data(), prep_result.data->size(),
+                                           a.conf, prep_result.scale, prep_result.pad_x,
+                                           prep_result.pad_y, synthetic_width, synthetic_height);
+            std::cout << "Self-test passed: OpenCV RVV preprocess " << prep_result.ms
+                      << " ms, " << ds.size() << " detections.\n";
             return 0;
         } catch (const std::exception& e) {
-            std::cerr << "Self-test inference failed: " << e.what() << "\n";
+            std::cerr << "Self-test failed: " << e.what() << "\n";
             return 6;
         }
     }
@@ -434,11 +460,12 @@ int main(int argc, char** argv) {
 
     // Ctrl-C/q/exception: stop capture and wake all stages. Normal max-frames
     // drains both queues before reaching this point.
-    if (abort.load()) {
-        prepared_queue.close();
-        result_queue.close();
-        camera.close();
-    }
+    // Always close the queues and camera before joining. On normal
+    // max-frames completion the producer has already closed prepared_queue;
+    // closing again is harmless and also makes the shutdown path deterministic.
+    prepared_queue.close();
+    result_queue.close();
+    camera.close();
     if (preprocess_thread.joinable()) preprocess_thread.join();
     if (inference_thread.joinable()) inference_thread.join();
     camera.close();

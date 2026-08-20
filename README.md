@@ -98,13 +98,14 @@ export XDG_RUNTIME_DIR=/run/user/1000
 --no-display       不创建 HighGUI 窗口
 --max-frames N     处理 N 帧后退出
 --dump-input PATH  保存首帧 640x640 FP32 CHW 输入
---self-test        初始化模型并执行一次全零输入推理
+--self-test        执行 NV12->OpenCV-RVV 前处理并完成一次推理
 ```
 
 ## 实现边界
 
 - 摄像头阶段保持 `v4l2src ! image/jpeg ! spacemitdec code-type=9 ! video/x-raw,format=NV12 ! appsink`，不使用 `videoconvert`。
 - NV12 会先复制成紧凑连续内存，避免 GStreamer/VPU buffer 生命周期导致 `queueBuffer ... Invalid argument`。
+- `FrameQueue` 使用 100 ms 轮询等待并检查 Ctrl-C；超时不会被误判为流结束，队列中已有帧会在关闭时先排空。
 - 前处理保持参考分支的 Y/UV 分平面 resize、114/128 NV12 letterbox、NV12 转 RGB、CHW 和 `/255`。
 - 推理线程只访问一个 ORT session；显示在主线程执行，保持 HighGUI 事件循环安全。
 - YOLOv8 解码当前支持 `[1,C,N]` 和 `[1,N,C]` 两种三维输出布局；对当前模型预期为 `[1,10,8400]`，即 4 个框通道加 6 个类别通道。

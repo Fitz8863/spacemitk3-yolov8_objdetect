@@ -140,11 +140,22 @@ std::vector<Detection> Yolov8Detector::infer(const float* data, std::size_t coun
     // Ultralytics YOLOv8 nms=False exports [1, 4+nc, 8400]. Accept the
     // transposed [1,8400,4+nc] form too, so the executable reports a useful
     // error only for genuinely incompatible models.
-    bool channels_first = shape[1] >= 5 && shape[2] > shape[1];
+    const auto valid_layout = [](int64_t channel_dim, int64_t prediction_dim) {
+        return channel_dim >= kBoxChannels + 1 && prediction_dim > 0;
+    };
+    bool channels_first = valid_layout(shape[1], shape[2]);
+    const bool rows_first = valid_layout(shape[2], shape[1]);
+    if (!channels_first && !rows_first) {
+        throw std::runtime_error("YOLOv8 output must contain box and class channels");
+    }
+    // Native Ultralytics exports use [1,C,N]. If both interpretations are
+    // mathematically possible, choose the smaller dimension as channels;
+    // this avoids silently treating a small-prediction model as transposed.
+    if (channels_first && rows_first) {
+        channels_first = shape[1] <= shape[2];
+    }
     const std::size_t channels = static_cast<std::size_t>(channels_first ? shape[1] : shape[2]);
     const std::size_t predictions = static_cast<std::size_t>(channels_first ? shape[2] : shape[1]);
-    if (channels < kBoxChannels + 1 || predictions == 0)
-        throw std::runtime_error("YOLOv8 output must contain box and class channels");
     const int num_classes = static_cast<int>(channels) - kBoxChannels;
 
     static int debug_frames = 0;

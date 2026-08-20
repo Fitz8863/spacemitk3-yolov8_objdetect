@@ -68,11 +68,27 @@ struct OpenCvRvvPreprocessor::Impl {
     std::array<cv::Mat, 3> channels;
 
     void ensure_buffers(const LetterboxGeometry& g) {
-        resized_y.create(g.resized_height, g.resized_width, CV_8UC1);
-        resized_uv.create(g.resized_height / 2, g.resized_width / 2, CV_8UC2);
-        letterbox_y.create(out_h, out_w, CV_8UC1);
-        letterbox_uv.create(out_h / 2, out_w / 2, CV_8UC2);
-        rgb.create(out_h, out_w, CV_8UC3);
+        // Geometry is normally constant for one camera, but create() also
+        // keeps this safe if a caller changes input resolution between frames.
+        if (resized_y.rows != g.resized_height || resized_y.cols != g.resized_width ||
+            resized_y.type() != CV_8UC1) {
+            resized_y.create(g.resized_height, g.resized_width, CV_8UC1);
+        }
+        if (resized_uv.rows != g.resized_height / 2 || resized_uv.cols != g.resized_width / 2 ||
+            resized_uv.type() != CV_8UC2) {
+            resized_uv.create(g.resized_height / 2, g.resized_width / 2, CV_8UC2);
+        }
+        if (letterbox_y.rows != out_h || letterbox_y.cols != out_w ||
+            letterbox_y.type() != CV_8UC1) {
+            letterbox_y.create(out_h, out_w, CV_8UC1);
+        }
+        if (letterbox_uv.rows != out_h / 2 || letterbox_uv.cols != out_w / 2 ||
+            letterbox_uv.type() != CV_8UC2) {
+            letterbox_uv.create(out_h / 2, out_w / 2, CV_8UC2);
+        }
+        if (rgb.rows != out_h || rgb.cols != out_w || rgb.type() != CV_8UC3) {
+            rgb.create(out_h, out_w, CV_8UC3);
+        }
     }
 
     std::shared_ptr<std::vector<float>> rgb_to_tensor(const cv::Mat& image) {
