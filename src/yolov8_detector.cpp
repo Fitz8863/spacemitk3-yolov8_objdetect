@@ -69,14 +69,20 @@ struct Yolov8Detector::Impl {
 Yolov8Detector::Yolov8Detector() = default;
 Yolov8Detector::~Yolov8Detector() = default;
 
-bool Yolov8Detector::init(const std::string& model_path, int intra_threads) {
+bool Yolov8Detector::init(const std::string& model_path, int intra_threads,
+                          const std::string& ep_affinity) {
     try {
         impl_ = std::make_unique<Impl>();
         Ort::SessionOptions options;
         options.SetIntraOpNumThreads(std::max(1, intra_threads));
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         std::unordered_map<std::string, std::string> ep_options;
-        ep_options["SPACEMIT_EP_INTRA_THREAD_NUM"] = std::to_string(std::max(1, intra_threads));
+        const int ep_threads = std::max(1, intra_threads);
+        ep_options["SPACEMIT_EP_INTRA_THREAD_NUM"] = std::to_string(ep_threads);
+        if (!ep_affinity.empty()) {
+            ep_options["SPACEMIT_EP_INTRA_THREAD_AFFINITY"] = ep_affinity;
+            std::cout << "SpaceMIT EP affinity: " << ep_affinity << "\n";
+        }
         Ort::SessionOptionsSpaceMITEnvInit(options, ep_options);
         impl_->session = std::make_unique<Ort::Session>(impl_->env, model_path.c_str(), options);
 
