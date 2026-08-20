@@ -1,0 +1,9 @@
+/build/
+/.shaders/
+*.o
+*.a
+*.so
+*.bin
+*.log
+
+/build-*/
