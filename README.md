@@ -98,7 +98,7 @@ export XDG_RUNTIME_DIR=/run/user/1000
 --no-display       不创建 HighGUI 窗口
 --max-frames N     处理 N 帧后退出
 --dump-input PATH  保存首帧 640x640 FP32 CHW 输入
---self-test        初始化 OpenCL GPU 和模型，并执行一次全零输入推理
+--self-test        初始化 OpenCL GPU 和模型，并执行一次真实 NV12 OpenCL 前处理和推理
 ```
 
 ## 实现边界
@@ -112,14 +112,28 @@ export XDG_RUNTIME_DIR=/run/user/1000
 
 ## RVV 分支基线验证（2026-08-20）
 
-以下是父分支 `gstreamer-opencv_rvv-k3` 在 K3 板端 `/home/spacemit/projects/yolov8` 的基线验证；OpenCL 分支需要重新编译并按下述日志确认 GPU 和端到端链路：
+父分支 `gstreamer-opencv_rvv-k3` 的基线数据如下；OpenCL 分支应以实际运行日志中的 `OpenCL GPU: ...`、`GStreamer camera opened` 和 `Done.` 行为准。
 
 - CMake 配置成功，使用 OpenCV `4.10.0`、板端 riscv64 编译器和 SpaceMIT ORT 依赖；
 - C++ 编译链接成功，生成 `build/yolov8_camera`；
-- `--self-test --no-display` 成功；运行时模型输入为 `[1,3,640,640]`，输出为 `[1,10,8400]`；
+- 模型运行时输入为 `[1,3,640,640]`，输出为 `[1,10,8400]`；
 - `/dev/video1` 成功通过 `spacemitdec code-type=9` 解码 1280x720 MJPEG，摄像头实际协商为 24 FPS；
 - `--no-display --max-frames 30` 端到端成功：`prepared=30`、`infer=29`、`display=27`，平均前处理约 `6.32 ms`，推理约 `29.48 ms`，检测到 `325` 个框；
 - 输出日志确认实际使用 `[1,C,N]`、`C=10`、`N=8400` 的 YOLOv8 解码路径。
+
+## OpenCL 分支验证（2026-08-20）
+
+已在 K3 板端验证当前 `gstreamer-opencl-k3` 工作树：
+
+- OpenCL 设备为 `PowerVR B-Series BXM-4-64`，平台为 `PowerVR`；
+- 全量清理编译成功，生成 `build/yolov8_camera`；
+- `--self-test --no-display` 成功，真实执行 1280x720 NV12 → OpenCL GPU 前处理 → SpaceMIT EP 推理；
+- `--no-display --max-frames 30` 成功：`prepared=30`、`infer=29`、`display=28`，平均前处理约 `8.35 ms`，推理约 `29.62 ms`；
+- OpenCL 资源复用后，前处理相较原始 OpenCL 实现的约 `15.82 ms` 明显下降；具体 FPS 会随摄像头、负载和队列丢帧策略变化。
+
+已知现象：
+
+- 退出摄像头管线时，`spacemitdec` 仍可能打印一次 `queueBuffer ... Invalid argument`；该现象在 RVV 基线分支也出现，当前应用能正常退出，尚未将其误报为 OpenCL 前处理故障。
 
 仍需注意：
 

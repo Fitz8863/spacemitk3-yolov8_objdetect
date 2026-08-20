@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <csignal>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -59,11 +60,22 @@ public:
                    bool prebuffer = false, size_t prebuffer_count = 1) {
         std::unique_lock<std::mutex> lock(mutex_);
         auto ready = [&] {
-            return closed_ || abort.load() ||
+            return closed_ || abort.load() || g_signal_stop != 0 ||
                    (!queue_.empty() && (!prebuffer || queue_.size() >= prebuffer_count));
         };
-        cv_.wait(lock, ready);
-        if (abort.load() && queue_.empty()) return false;
+        // Poll periodically so Ctrl-C can be observed even while a stage is
+        // waiting for a frame. A signal handler cannot safely notify this CV;
+        // polling also checks g_signal_stop so Ctrl-C wakes every stage.
+        // Keep waiting after a spurious/periodic timeout; returning false here
+        // would make the consumer exit whenever a frame takes longer than the
+        // polling interval to arrive.
+        while (!ready()) {
+            cv_.wait_for(lock, std::chrono::milliseconds(100));
+        }
+        // If the producer closed normally, drain any frames already queued.
+        // On abort, also consume an already available newest frame, then stop
+        // once the queue is empty.
+        if ((abort.load() || g_signal_stop != 0) && queue_.empty()) return false;
         if (queue_.empty()) return false;
         value = std::move(queue_.back());
         if (queue_.size() > 1) dropped_pending_ += queue_.size() - 1;
@@ -257,13 +269,31 @@ int main(int argc, char** argv) {
     Yolov8Detector detector;
     if (!detector.init(a.model, a.intra_threads)) return 5;
     if (a.self_test) {
-        std::vector<float> zeros(3 * 640 * 640, 0.0f);
         try {
-            const auto ds = detector.infer(zeros.data(), zeros.size(), a.conf, 1.0f, 0, 0, 640, 640);
-            std::cout << "Self-test passed: " << ds.size() << " detections.\n";
+            // Exercise the actual OpenCL NV12 -> tensor path as well as the
+            // SpaceMIT EP model path. This catches kernel/image/queue errors
+            // that a model-only zero-tensor test cannot detect.
+            constexpr int synthetic_width = 1280;
+            constexpr int synthetic_height = 720;
+            cv::Mat synthetic_nv12(synthetic_height * 3 / 2, synthetic_width,
+                                   CV_8UC1, cv::Scalar(128));
+            const auto prep_result = pre.preprocess(synthetic_nv12);
+            if (!prep_result.data || prep_result.data->size() != 3 * 640 * 640) {
+                throw std::runtime_error("OpenCL self-test returned an invalid tensor");
+            }
+            for (float value : *prep_result.data) {
+                if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+                    throw std::runtime_error("OpenCL self-test returned invalid tensor values");
+                }
+            }
+            const auto ds = detector.infer(prep_result.data->data(), prep_result.data->size(),
+                                           a.conf, prep_result.scale, prep_result.pad_x,
+                                           prep_result.pad_y, synthetic_width, synthetic_height);
+            std::cout << "Self-test passed: OpenCL preprocess " << prep_result.ms
+                      << " ms, " << ds.size() << " detections.\n";
             return 0;
         } catch (const std::exception& e) {
-            std::cerr << "Self-test inference failed: " << e.what() << "\n";
+            std::cerr << "Self-test failed: " << e.what() << "\n";
             return 6;
         }
     }
@@ -381,6 +411,7 @@ int main(int argc, char** argv) {
         if (g_signal_stop) abort.store(true);
         std::shared_ptr<InferenceResult> item;
         if (!result_queue.popLatest(item, abort, first_display, a.queue_depth)) {
+            if (g_signal_stop) abort.store(true);
             if (inference_done.load()) break;
             if (abort.load()) break;
             continue;
