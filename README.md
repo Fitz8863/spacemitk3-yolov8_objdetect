@@ -58,6 +58,7 @@ export XDG_RUNTIME_DIR=/run/user/1000
   --camera 1 \
   --width 1280 --height 720 --fps 25 \
   --intra-threads 4 \
+  --ep-affinity "8;9;10;11" \
   --queue-depth 3 \
   --conf 0.25
 ```
@@ -95,6 +96,7 @@ export XDG_RUNTIME_DIR=/run/user/1000
 --focus N          手动对焦，默认 0；-1 表示不改动
 --zoom N           绝对变焦，默认 181；-1 表示不改动
 --intra-threads N  SpaceMIT EP 线程数，默认 1
+--ep-affinity LIST  EP 线程绑定的 AI 核，数量必须等于 --intra-threads
 --no-display       不创建 HighGUI 窗口
 --max-frames N     处理 N 帧后退出
 --dump-input PATH  保存首帧 640x640 FP32 CHW 输入

@@ -26,7 +26,8 @@ public:
     Yolov8Detector(const Yolov8Detector&) = delete;
     Yolov8Detector& operator=(const Yolov8Detector&) = delete;
 
-    bool init(const std::string& model_path, int intra_threads = 1);
+    bool init(const std::string& model_path, int intra_threads = 1,
+              const std::string& ep_affinity = {});
     std::vector<Detection> infer(const float* data, std::size_t count,
                                  float conf_threshold, float scale,
                                  int pad_x, int pad_y,

@@ -125,6 +125,7 @@ struct Args {
     std::string device;
     int width = 1280, height = 720, fps = 25;
     int intra_threads = 1;
+    std::string ep_affinity;
     int focus = 0, zoom = 181;
     float conf = 0.25f;
     size_t queue_depth = 3;
@@ -169,6 +170,7 @@ static void usage(const char* exe) {
               << "  --focus N          fixed manual focus (default 0; -1 unchanged)\n"
               << "  --zoom N           zoom absolute value (default 181; -1 unchanged)\n"
               << "  --intra-threads N  SpaceMIT EP threads (default 1)\n"
+              << "  --ep-affinity LIST bind EP threads to cores, e.g. 8;9;10;11\n"
               << "  --no-display       run pipeline without window\n"
               << "  --max-frames N     stop after N frames enter preprocess (0=unlimited)\n"
               << "  --dump-input PATH  dump first preprocessed tensor as float32\n"
@@ -192,6 +194,7 @@ static bool parse(int argc, char** argv, Args& a) {
         else if (k == "--focus" && (v = need(i))) a.focus = std::stoi(v);
         else if (k == "--zoom" && (v = need(i))) a.zoom = std::stoi(v);
         else if (k == "--intra-threads" && (v = need(i))) a.intra_threads = std::stoi(v);
+        else if (k == "--ep-affinity" && (v = need(i))) a.ep_affinity = v;
         else if (k == "--max-frames" && (v = need(i))) a.max_frames = std::stoi(v);
         else if (k == "--no-display") a.no_display = true;
         else if (k == "--dump-input" && (v = need(i))) a.dump_input = v;
@@ -199,6 +202,32 @@ static bool parse(int argc, char** argv, Args& a) {
         else { std::cerr << "Unknown or incomplete option: " << k << "\n"; usage(argv[0]); return false; }
     }
     a.queue_depth = std::clamp<size_t>(a.queue_depth, 1, 8);
+    if (a.intra_threads < 1) {
+        std::cerr << "--intra-threads must be >= 1\n";
+        return false;
+    }
+    if (!a.ep_affinity.empty()) {
+        std::size_t count = 1;
+        for (char c : a.ep_affinity) {
+            if (c == ';') ++count;
+            else if (c < '0' || c > '9') {
+                std::cerr << "--ep-affinity must be a semicolon-separated list of core IDs, "
+                             "for example 8;9;10;11\n";
+                return false;
+            }
+        }
+        if (a.ep_affinity.front() == ';' || a.ep_affinity.back() == ';' ||
+            a.ep_affinity.find(";;") != std::string::npos) {
+            std::cerr << "--ep-affinity contains an empty core ID\n";
+            return false;
+        }
+        if (count != static_cast<std::size_t>(a.intra_threads)) {
+            std::cerr << "--ep-affinity contains " << count
+                      << " core IDs, but --intra-threads is " << a.intra_threads
+                      << "; the counts must match\n";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -263,7 +292,7 @@ int main(int argc, char** argv) {
     OpenCvRvvPreprocessor pre;
     if (!pre.init()) return 4;
     Yolov8Detector detector;
-    if (!detector.init(a.model, a.intra_threads)) return 5;
+    if (!detector.init(a.model, a.intra_threads, a.ep_affinity)) return 5;
     if (a.self_test) {
         try {
             // Exercise the same NV12 -> letterbox -> RGB -> CHW path used by
