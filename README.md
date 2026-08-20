@@ -1,7 +1,7 @@
 # SpaceMIT K3 YOLOv8 摄像头推理
 
-这个目录实现了 YOLOv8 在 SpaceMIT K3 板端的实时摄像头推理，摄像头读取、MJPEG 硬件解码、OpenCV-RVV 前处理、队列、显示方式与
-`spacemitk3_yolo26_detect` 仓库的 `gstreamer-opencv_rvv-k3` 分支保持一致。
+这个目录实现了 YOLOv8 在 SpaceMIT K3 板端的实时摄像头推理，摄像头读取、MJPEG 硬件解码、OpenCL GPU 前处理、队列、显示方式与
+`spacemitk3_yolo26_detect` 仓库的 `gstreamer-opencl-k3` 分支保持一致。
 
 ## 数据流
 
@@ -10,7 +10,7 @@ USB 摄像头 V4L2 MJPEG 1280x720@25
   -> GStreamer v4l2src
   -> spacemitdec code-type=9（K3 VPU 硬件解码）
   -> appsink NV12（只保留最新帧）
-  -> OpenCV-RVV：Y/UV resize + letterbox + NV12->RGB + HWC->CHW + FP32/255
+  -> OpenCL GPU：Y/UV 上传 + NV12->RGB + resize + letterbox + CHW + FP32/255
   -> SpaceMIT ONNX Runtime EP
   -> YOLOv8 raw output [1, 4+nc, N]
   -> xywh 解码 + 置信度筛选 + class-aware NMS
@@ -33,11 +33,11 @@ cmake -S . -B build \
 cmake --build build -j4
 ```
 
-如果板端没有 `/opt/opencv-spacemit/lib/cmake/opencv4`，去掉 `-DOpenCV_DIR=...`，以 CMake 实际打印的 OpenCV include/library 路径为准。参考分支使用的是系统/板端 OpenCV 包；本机 x86 工作区没有安装 CMake、OpenCV C++ 开发头文件或 SpaceMIT ORT，因此这里不能代替 K3 板端完成链接验证。
+如果板端没有 `/opt/opencv-spacemit/lib/cmake/opencv4`，去掉 `-DOpenCV_DIR=...`，以 CMake 实际打印的 OpenCV include/library 路径为准。参考分支使用的是系统/板端 OpenCV 包；应在 K3 板端编译；本工作区的本机环境不作为 riscv64/SpaceMIT 运行时验证依据。
 
 ## 运行
 
-### 模型和 SpaceMIT EP 自测（不访问摄像头）
+### 模型和 OpenCL/SpaceMIT EP 自测（不访问摄像头）
 
 ```bash
 cd /home/spacemit/projects/yolov8
@@ -98,21 +98,21 @@ export XDG_RUNTIME_DIR=/run/user/1000
 --no-display       不创建 HighGUI 窗口
 --max-frames N     处理 N 帧后退出
 --dump-input PATH  保存首帧 640x640 FP32 CHW 输入
---self-test        初始化模型并执行一次全零输入推理
+--self-test        初始化 OpenCL GPU 和模型，并执行一次全零输入推理
 ```
 
 ## 实现边界
 
 - 摄像头阶段保持 `v4l2src ! image/jpeg ! spacemitdec code-type=9 ! video/x-raw,format=NV12 ! appsink`，不使用 `videoconvert`。
 - NV12 会先复制成紧凑连续内存，避免 GStreamer/VPU buffer 生命周期导致 `queueBuffer ... Invalid argument`。
-- 前处理保持参考分支的 Y/UV 分平面 resize、114/128 NV12 letterbox、NV12 转 RGB、CHW 和 `/255`。
+- 前处理使用 OpenCL GPU kernel 完成 Y/UV 图像采样、NV12 转 RGB、resize、114/128 letterbox、CHW 和 `/255`；主机侧仅负责将 NV12 的 Y/UV 数据上传到 OpenCL。
 - 推理线程只访问一个 ORT session；显示在主线程执行，保持 HighGUI 事件循环安全。
 - YOLOv8 解码当前支持 `[1,C,N]` 和 `[1,N,C]` 两种三维输出布局；对当前模型预期为 `[1,10,8400]`，即 4 个框通道加 6 个类别通道。
 - YOLOv8 输出的框按 `cx,cy,w,h`、类别分数已在导出图中完成 DFL/激活，程序不会再次对类别分数做 sigmoid；随后撤销 letterbox 并做按类别 NMS。
 
-## 验证状态（2026-08-20）
+## RVV 分支基线验证（2026-08-20）
 
-已在 K3 板端 `/home/spacemit/projects/yolov8` 验证：
+以下是父分支 `gstreamer-opencv_rvv-k3` 在 K3 板端 `/home/spacemit/projects/yolov8` 的基线验证；OpenCL 分支需要重新编译并按下述日志确认 GPU 和端到端链路：
 
 - CMake 配置成功，使用 OpenCV `4.10.0`、板端 riscv64 编译器和 SpaceMIT ORT 依赖；
 - C++ 编译链接成功，生成 `build/yolov8_camera`；

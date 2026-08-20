@@ -1,5 +1,5 @@
 #include "gstreamer_camera.h"
-#include "opencv_rvv_preprocess.h"
+#include "opencl_preprocess.h"
 #include "yolov8_detector.h"
 
 #include <opencv2/highgui.hpp>
@@ -99,7 +99,7 @@ struct PreparedFrame {
     uint64_t id = 0;
     int width = 0;
     int height = 0;
-    OpenCvRvvPreprocessor::Result prep;
+    OpenClPreprocessor::Result prep;
     std::shared_ptr<cv::Mat> nv12;
 };
 
@@ -164,7 +164,7 @@ static void usage(const char* exe) {
               << "  --no-display       run pipeline without window\n"
               << "  --max-frames N     stop after N frames enter preprocess (0=unlimited)\n"
               << "  --dump-input PATH  dump first preprocessed tensor as float32\n"
-              << "  --self-test        initialize OpenCV RVV and model, run one inference\n";
+              << "  --self-test        initialize OpenCL GPU and model, run one inference\n";
 }
 
 static bool parse(int argc, char** argv, Args& a) {
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    OpenCvRvvPreprocessor pre;
+    OpenClPreprocessor pre;
     if (!pre.init()) return 4;
     Yolov8Detector detector;
     if (!detector.init(a.model, a.intra_threads)) return 5;
@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
     const auto start = Clock::now();
 
     // Thread 1: OpenCV VideoCapture -> GStreamer -> K3 spacemitdec -> NV12,
-    // followed by OpenCV-RVV preprocessing. appsink keeps only the newest frame.
+    // followed by OpenCL GPU preprocessing. appsink keeps only the newest frame.
     std::thread preprocess_thread([&] {
         uint64_t id = 0;
         int timeout_count = 0;
