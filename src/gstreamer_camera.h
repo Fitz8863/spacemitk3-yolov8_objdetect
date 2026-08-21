@@ -5,8 +5,8 @@
 #include <string>
 
 // OpenCV's VideoCapture owns the GStreamer pipeline. The pipeline keeps JPEG
-// capture and MJPEG decode inside GStreamer; spacemitdec selects the K3 MPP
-// decoder. appsink is configured as a latest-frame sink to avoid latency.
+// capture and MJPEG decode stay inside GStreamer. spacemitdec is preferred when
+// a V4L2 M2M decoder exists; jpegdec is the safe software fallback.
 class GstreamerMjpegCamera {
 public:
     GstreamerMjpegCamera() = default;
@@ -20,6 +20,7 @@ public:
     bool isOpen() const;
     const std::string& device() const { return device_; }
     const std::string& pipeline() const { return pipeline_; }
+    const std::string& decoder() const { return decoder_; }
     int negotiated_fps() const { return negotiated_fps_; }
 
 private:
@@ -30,6 +31,7 @@ private:
     cv::VideoCapture capture_;
     std::string device_;
     std::string pipeline_;
+    std::string decoder_;
     int width_ = 0;
     int height_ = 0;
     int requested_fps_ = 0;

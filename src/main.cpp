@@ -348,7 +348,7 @@ int main(int argc, char** argv) {
     Stats stats;
     const auto start = Clock::now();
 
-    // Thread 1: OpenCV VideoCapture -> GStreamer -> K3 spacemitdec -> NV12,
+    // Thread 1: OpenCV VideoCapture -> GStreamer -> spacemitdec/jpegdec -> NV12,
     // followed by OpenCV-RVV preprocessing. appsink keeps only the newest frame.
     std::thread preprocess_thread([&] {
         uint64_t id = 0;

@@ -1,6 +1,6 @@
 # SpaceMIT K3 YOLOv8 摄像头推理
 
-这个目录实现了 YOLOv8 在 SpaceMIT K3 板端的实时摄像头推理，摄像头读取、MJPEG 硬件解码、OpenCV-RVV 前处理、队列、显示方式与
+这个目录实现了 YOLOv8 在 SpaceMIT K3 板端的实时摄像头推理，摄像头读取、MJPEG 解码、OpenCV-RVV 前处理、队列、显示方式与
 `spacemitk3_yolo26_detect` 仓库的 `gstreamer-opencv_rvv-k3` 分支保持一致。
 
 ## 数据流
@@ -8,7 +8,8 @@
 ```text
 USB 摄像头 V4L2 MJPEG 1280x720@25
   -> GStreamer v4l2src
-  -> spacemitdec code-type=9（K3 VPU 硬件解码）
+  -> 优先 spacemitdec code-type=9（K3 VPU 硬件解码）
+     无可用 V4L2 M2M 解码节点时自动回退 jpegdec + videoconvert
   -> appsink NV12（只保留最新帧）
   -> OpenCV-RVV：Y/UV resize + letterbox + NV12->RGB + HWC->CHW + FP32/255
   -> SpaceMIT ONNX Runtime EP
@@ -105,7 +106,7 @@ export XDG_RUNTIME_DIR=/run/user/1000
 
 ## 实现边界
 
-- 摄像头阶段保持 `v4l2src ! image/jpeg ! spacemitdec code-type=9 ! video/x-raw,format=NV12 ! appsink`，不使用 `videoconvert`。
+- 摄像头阶段优先使用 `v4l2src ! image/jpeg ! spacemitdec code-type=9 ! video/x-raw,format=NV12 ! appsink`。如果没有检测到可用的 V4L2 M2M 节点，则跳过可能触发 MPP 段错误的 `spacemitdec`，自动使用 `jpegdec ! videoconvert ! video/x-raw,format=NV12` 软件解码。
 - NV12 会先复制成紧凑连续内存，避免 GStreamer/VPU buffer 生命周期导致 `queueBuffer ... Invalid argument`。
 - `FrameQueue` 使用 100 ms 轮询等待并检查 Ctrl-C；超时不会被误判为流结束，队列中已有帧会在关闭时先排空。
 - 前处理保持参考分支的 Y/UV 分平面 resize、114/128 NV12 letterbox、NV12 转 RGB、CHW 和 `/255`。
