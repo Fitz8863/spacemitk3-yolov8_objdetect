@@ -26,7 +26,7 @@ public:
     };
 
     // The OpenCV RVV implementation is selected by the OpenCV package passed
-    // to CMake (normally /opt/opencv-spacemit/lib/cmake/opencv4).
+    // to CMake via OpenCV_DIR or the system package search path.
     bool init(int out_width = 640, int out_height = 640);
 
     // Accepts a tightly packed NV12 image: rows=height*3/2, cols=width,

@@ -5,31 +5,84 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
 
-# On K3, explicitly select the SpacemiT RVV OpenCV package:
-#   cmake -S . -B build -DOpenCV_DIR=/opt/opencv-spacemit/lib/cmake/opencv4
-# If OpenCV_DIR is omitted, CMake uses its normal package search path.
+# OpenCV is intentionally discovered through the normal CMake search path.
+# On a board with a non-standard SDK, pass -DOpenCV_DIR=<opencv-prefix>/lib/cmake/opencv4.
 find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio)
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
+    gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
+
+# SpaceMIT ONNX Runtime is not part of the generic upstream ONNX Runtime
+# package: this application needs both spacemit_ort_env.h and spacemit_ep.
+# Keep the default portable (system paths); use this cache variable only when
+# the board's SpaceMIT SDK is installed outside the standard system prefixes.
+set(SPACEMIT_ORT_ROOT "" CACHE PATH
+    "SpaceMIT ONNX Runtime prefix containing include/ and lib/")
+
+option(SPACEMIT_ALLOW_UNRESOLVED_SHARED_DEPS
+    "Allow incomplete unpacked SDK shared libraries at link time" OFF)
+
+if(SPACEMIT_ORT_ROOT)
+    find_path(SPACEMIT_ORT_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
+        PATHS "${SPACEMIT_ORT_ROOT}/include" NO_DEFAULT_PATH)
+    find_path(SPACEMIT_ORT_ENV_INCLUDE_DIR NAMES spacemit_ort_env.h
+        PATHS "${SPACEMIT_ORT_ROOT}/include" NO_DEFAULT_PATH)
+    find_library(SPACEMIT_ORT_LIBRARY NAMES onnxruntime
+        PATHS "${SPACEMIT_ORT_ROOT}/lib"
+              "${SPACEMIT_ORT_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        NO_DEFAULT_PATH)
+    find_library(SPACEMIT_EP_LIBRARY NAMES spacemit_ep
+        PATHS "${SPACEMIT_ORT_ROOT}/lib"
+              "${SPACEMIT_ORT_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        NO_DEFAULT_PATH)
+else()
+    find_path(SPACEMIT_ORT_INCLUDE_DIR NAMES onnxruntime_cxx_api.h)
+    find_path(SPACEMIT_ORT_ENV_INCLUDE_DIR NAMES spacemit_ort_env.h)
+    find_library(SPACEMIT_ORT_LIBRARY NAMES onnxruntime)
+    find_library(SPACEMIT_EP_LIBRARY NAMES spacemit_ep)
+endif()
+
+if(NOT SPACEMIT_ORT_INCLUDE_DIR OR NOT SPACEMIT_ORT_ENV_INCLUDE_DIR OR
+   NOT SPACEMIT_ORT_LIBRARY OR NOT SPACEMIT_EP_LIBRARY)
+    message(FATAL_ERROR
+        "SpaceMIT ONNX Runtime development files were not found.\n"
+        "  SPACEMIT_ORT_INCLUDE_DIR = ${SPACEMIT_ORT_INCLUDE_DIR}\n"
+        "  SPACEMIT_ORT_LIBRARY     = ${SPACEMIT_ORT_LIBRARY}\n"
+        "  SPACEMIT_EP_LIBRARY      = ${SPACEMIT_EP_LIBRARY}\n"
+        "Install the SpaceMIT ORT SDK in a system prefix, or configure with:\n"
+        "  -DSPACEMIT_ORT_ROOT=<spacemit-onnxruntime-prefix>")
+endif()
 
 add_executable(yolov8_camera
     src/main.cpp
     src/gstreamer_camera.cpp
     src/opencv_rvv_preprocess.cpp
-    src/yolov8_detector.cpp
-)
+    src/yolov8_detector.cpp)
 
 target_include_directories(yolov8_camera PRIVATE
     ${OpenCV_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
+    ${SPACEMIT_ORT_INCLUDE_DIR}
+    ${SPACEMIT_ORT_ENV_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(yolov8_camera PRIVATE
     ${OpenCV_LIBS}
-    onnxruntime
-    spacemit_ep
+    ${SPACEMIT_ORT_LIBRARY}
+    ${SPACEMIT_EP_LIBRARY}
     Threads::Threads
-    dl
-)
+    PkgConfig::GSTREAMER
+    dl)
+
+if(SPACEMIT_ALLOW_UNRESOLVED_SHARED_DEPS)
+    target_link_options(yolov8_camera PRIVATE -Wl,--allow-shlib-undefined)
+endif()
+
+# Do not embed this checkout's absolute build/SDK paths in the executable.
+set_target_properties(yolov8_camera PROPERTIES
+    SKIP_BUILD_RPATH TRUE
+    BUILD_WITH_INSTALL_RPATH FALSE
+    INSTALL_RPATH "")
 
 target_compile_options(yolov8_camera PRIVATE -O3 -ffast-math -Wall -Wextra -Wpedantic)
 
@@ -37,4 +90,7 @@ message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
 message(STATUS "OpenCV library dirs: ${OpenCV_LIBRARY_DIRS}")
+message(STATUS "SpaceMIT ORT include dir: ${SPACEMIT_ORT_INCLUDE_DIR}")
+message(STATUS "SpaceMIT ORT library: ${SPACEMIT_ORT_LIBRARY}")
+message(STATUS "SpaceMIT EP library: ${SPACEMIT_EP_LIBRARY}")
 message(STATUS "GStreamer camera + OpenCV RVV preprocessing project")

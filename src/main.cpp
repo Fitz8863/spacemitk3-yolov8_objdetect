@@ -94,6 +94,12 @@ public:
         return n;
     }
 
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.clear();
+        dropped_pending_ = 0;
+    }
+
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
@@ -109,6 +115,7 @@ struct PreparedFrame {
     int height = 0;
     OpenCvRvvPreprocessor::Result prep;
     std::shared_ptr<cv::Mat> nv12;
+    std::shared_ptr<void> gst_owner;
 };
 
 struct InferenceResult {
@@ -116,6 +123,7 @@ struct InferenceResult {
     int width = 0;
     int height = 0;
     std::shared_ptr<cv::Mat> nv12;
+    std::shared_ptr<void> gst_owner;
     std::vector<Detection> detections;
 };
 
@@ -325,7 +333,7 @@ int main(int argc, char** argv) {
 
     GstreamerMjpegCamera camera;
     if (!camera.open(a.camera, a.device, a.width, a.height, a.fps,
-                     a.focus, a.zoom)) {
+                     a.focus, a.zoom, a.max_frames)) {
         std::cerr << "Camera open failed.\n";
         return 3;
     }
@@ -343,20 +351,21 @@ int main(int argc, char** argv) {
     std::atomic<bool> abort{false};
     std::atomic<bool> preprocess_done{false};
     std::atomic<bool> inference_done{false};
+    std::atomic<bool> camera_stop{false};
     FrameQueue<PreparedFrame> prepared_queue(a.queue_depth);
     FrameQueue<InferenceResult> result_queue(a.queue_depth);
     Stats stats;
     const auto start = Clock::now();
 
-    // Thread 1: OpenCV VideoCapture -> GStreamer -> spacemitdec/jpegdec -> NV12,
+    // Thread 1: native GStreamer -> spacemitdec/jpegdec -> NV12,
     // followed by OpenCV-RVV preprocessing. appsink keeps only the newest frame.
     std::thread preprocess_thread([&] {
         uint64_t id = 0;
         int timeout_count = 0;
-        while (!abort.load() &&
+        while (!abort.load() && !camera_stop.load() &&
                (a.max_frames <= 0 || static_cast<int>(id) < a.max_frames)) {
-            auto nv12 = std::make_shared<cv::Mat>();
-            if (!camera.read(*nv12, 1000)) {
+            GstreamerFrame frame;
+            if (!camera.read(frame, 1000)) {
                 if (abort.load()) break;
                 if (++timeout_count >= 10) {
                     std::cerr << "Camera read timeout/error in GStreamer stage\n";
@@ -368,9 +377,10 @@ int main(int argc, char** argv) {
             timeout_count = 0;
             auto packet = std::make_shared<PreparedFrame>();
             packet->id = id++;
-            packet->width = nv12->cols;
-            packet->height = (nv12->rows * 2) / 3;
-            packet->nv12 = std::move(nv12);
+            packet->width = frame.nv12.cols;
+            packet->height = (frame.nv12.rows * 2) / 3;
+            packet->nv12 = std::make_shared<cv::Mat>(std::move(frame.nv12));
+            packet->gst_owner = std::move(frame.owner);
             try {
                 const auto t0 = Clock::now();
                 packet->prep = pre.preprocess(*packet->nv12);
@@ -407,6 +417,7 @@ int main(int argc, char** argv) {
                 result->width = packet->width;
                 result->height = packet->height;
                 result->nv12 = packet->nv12;
+                result->gst_owner = packet->gst_owner;
                 result->detections = detector.infer(packet->prep.data->data(), packet->prep.data->size(), a.conf,
                                                      packet->prep.scale, packet->prep.pad_x, packet->prep.pad_y,
                                                      packet->width, packet->height);
@@ -487,16 +498,18 @@ int main(int argc, char** argv) {
         if (abort.load()) break;
     }
 
-    // Ctrl-C/q/exception: stop capture and wake all stages. Normal max-frames
-    // drains both queues before reaching this point.
-    // Always close the queues and camera before joining. On normal
-    // max-frames completion the producer has already closed prepared_queue;
-    // closing again is harmless and also makes the shutdown path deterministic.
+    // Ctrl-C/q/exception: request all stages to stop and wake queue waiters.
+    // Join every worker before touching the native GStreamer pipeline. The
+    // queues are explicitly emptied first, so no application-owned frame is
+    // still retained when the VPU decoder is drained and destroyed.
+    camera_stop.store(true);
+    abort.store(true);
     prepared_queue.close();
     result_queue.close();
-    camera.close();
     if (preprocess_thread.joinable()) preprocess_thread.join();
     if (inference_thread.joinable()) inference_thread.join();
+    prepared_queue.clear();
+    result_queue.clear();
     camera.close();
     if (!a.no_display) cv::destroyAllWindows();
 
