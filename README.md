@@ -107,7 +107,9 @@ export XDG_RUNTIME_DIR=/run/user/1000
 ## 实现边界
 
 - 摄像头阶段优先使用 `v4l2src ! image/jpeg ! spacemitdec code-type=9 ! video/x-raw,format=NV12 ! appsink`。如果没有检测到可用的 V4L2 M2M 节点，则跳过可能触发 MPP 段错误的 `spacemitdec`，自动使用 `jpegdec ! videoconvert ! video/x-raw,format=NV12` 软件解码。
-- NV12 会先复制成紧凑连续内存，避免 GStreamer/VPU buffer 生命周期导致 `queueBuffer ... Invalid argument`。
+- NV12 默认尽量走浅拷贝：`GstVideoFrame` 映射后，OpenCV `cv::Mat` 只创建 header，不复制像素；`GstreamerFrame::owner` 持有 `GstSample` 和映射状态，并随帧经过 OpenCL 前处理、推理、显示队列，直到最后一个消费者释放后才 unmap/unref。
+- 零拷贝只在两个 plane 能表示为一个兼容的 NV12 视图时启用：Y/UV stride 满足要求，且 UV 紧接在 Y plane 后面；如果 VPU/GStreamer 给出分离 plane 或不兼容 padding，则自动逐行深拷贝，并打印 `safe copy fallback`。旧的 `read(cv::Mat&)` 兼容接口会主动 `clone()`。
+- 队列深度必须保持有限（默认 3），因为零拷贝会短暂持有 VPU/GStreamer buffer；退出时先停止采集线程、等待工作线程退出并清空应用队列，再向 GStreamer pipeline 发送 EOS、等待 decoder drain，最后释放 pipeline，避免 VPU buffer 生命周期问题。
 - 前处理使用 OpenCL GPU kernel 完成 Y/UV 图像采样、NV12 转 RGB、resize、114/128 letterbox、CHW 和 `/255`；主机侧仅负责将 NV12 的 Y/UV 数据上传到 OpenCL。
 - 推理线程只访问一个 ORT session；显示在主线程执行，保持 HighGUI 事件循环安全。
 - YOLOv8 解码当前支持 `[1,C,N]` 和 `[1,N,C]` 两种三维输出布局；对当前模型预期为 `[1,10,8400]`，即 4 个框通道加 6 个类别通道。
@@ -136,10 +138,20 @@ export XDG_RUNTIME_DIR=/run/user/1000
 
 已知现象：
 
-- 退出摄像头管线时，`spacemitdec` 仍可能打印一次 `queueBuffer ... Invalid argument`；该现象在 RVV 基线分支也出现，当前应用能正常退出，尚未将其误报为 OpenCL 前处理故障。
+- 退出摄像头管线时，当前验证未再出现 `queueBuffer ... Invalid argument`；驱动仍可能打印一次 `V4L2_EVENT_EOS event is not support yet`，这是板端 MPP/V4L2 对 EOS 事件的已知提示，不是应用队列未清空，也未导致程序退出失败。
 
 仍需注意：
 
 - 25 FPS caps 首次协商失败后会自动回退到 24 FPS，这是当前摄像头能力表现；
-- 短测末尾仍可能出现一次 `spacemitdec queueBuffer ... Invalid argument`，与参考分支观察到的 VPU buffer 生命周期告警一致；程序随后正常退出。建议再做带显示器的长时间稳定性测试；
+- 可用 `SPACEMIT_FORCE_SOFTWARE_DECODER=1` 强制验证软件解码；本次软件路径也打印 NV12 零拷贝日志并正常退出：`prepared=10`、`infer=8`、`display=6`；
+- 当前硬件解码日志示例：
+  ```text
+  [Decoder] Using hardware decoder: spacemitdec (V4L2 M2M/MJPEG -> NV12)
+  [Camera] NV12 path: zero-copy GstBuffer -> OpenCV Mat header (owner retained until consumers release the frame)
+  ```
+- 当前软件解码日志示例：
+  ```text
+  [Decoder] Software decoder forced by SPACEMIT_FORCE_SOFTWARE_DECODER
+  [Decoder] Using software decoder: jpegdec
+  ```
 - 本次已验证无显示端到端链路，HighGUI 显示代码保持参考分支方式，但尚未做长时间带显示器测试。
